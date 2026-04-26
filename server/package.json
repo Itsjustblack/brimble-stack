@@ -1,0 +1,40 @@
+{
+	"name": "server",
+	"version": "1.0.0",
+	"description": "",
+	"main": "app.js",
+	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1",
+		"dev": "npx prisma migrate deploy && tsx watch src/app.ts",
+		"dev:worker": "tsx watch src/worker.ts",
+		"build": "tsc",
+		"start": "node dist/src/app.js",
+		"start:api": "node dist/src/app.js",
+		"start:worker": "node dist/src/worker.js"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"type": "module",
+	"devDependencies": {
+		"@types/cors": "^2.8.19",
+		"@types/dockerode": "^4.0.1",
+		"@types/express": "^5.0.6",
+		"@types/node": "^25.6.0",
+		"tsx": "^4.21.0",
+		"typescript": "^6.0.3"
+	},
+	"dependencies": {
+		"@prisma/adapter-pg": "^7.7.0",
+		"@prisma/client": "^7.7.0",
+		"bullmq": "^5.76.1",
+		"cors": "^2.8.6",
+		"dockerode": "^5.0.0",
+		"dotenv": "^17.4.2",
+		"execa": "^9.6.1",
+		"express": "^5.2.1",
+		"ioredis": "^5.10.1",
+		"prisma": "^7.7.0",
+		"zod": "^4.3.6"
+	}
+}
