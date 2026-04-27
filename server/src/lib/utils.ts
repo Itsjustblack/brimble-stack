@@ -2,42 +2,46 @@ import { execa, ExecaError } from "execa";
 import type { Readable } from "node:stream";
 import { internalError } from "./errors.js";
 import { logger } from "./logger.js";
-import { GITHUB_NAMESPACE } from "./constants.js";
+
+const GITHUB_NAMESPACE = "brimble-stack";
 
 export function getImageTag(deploymentId: string) {
 	return `${GITHUB_NAMESPACE}/deploy-${deploymentId}:latest`;
 }
 
-export async function getImagePort(deploymentId: string): Promise<string[]> {
-	const imageName = getImageTag(deploymentId);
+export const getDeploymentLogChannel = (deploymentId: string) =>
+	`deploy:${deploymentId}:logs`;
 
-	const inspectResult = await runCommand({
-		command: "docker",
-		args: ["inspect", imageName, "--format", "{{json .Config.ExposedPorts}}"],
-		deploymentId,
-		failureMessage: "Failed to inspect Docker image ports",
-		failureDetails: { imageName },
-		buffer: true,
-	});
+// export async function getImagePort(deploymentId: string): Promise<string[]> {
+// 	const imageName = getImageTag(deploymentId);
 
-	const stdout = inspectResult.stdout;
-	const output = typeof stdout === "string" ? stdout.trim() : "";
-	const exposedPorts: Record<string, unknown> | null = output
-		? JSON.parse(output)
-		: null;
+// 	const inspectResult = await runCommand({
+// 		command: "docker",
+// 		args: ["inspect", imageName, "--format", "{{json .Config.ExposedPorts}}"],
+// 		deploymentId,
+// 		failureMessage: "Failed to inspect Docker image ports",
+// 		failureDetails: { imageName },
+// 		buffer: true,
+// 	});
 
-	if (!exposedPorts) {
-		logger.info("No exposed ports found", { deploymentId, imageName });
-		return [];
-	}
+// 	const stdout = inspectResult.stdout;
+// 	const output = typeof stdout === "string" ? stdout.trim() : "";
+// 	const exposedPorts: Record<string, unknown> | null = output
+// 		? JSON.parse(output)
+// 		: null;
 
-	const ports = [
-		...new Set(Object.keys(exposedPorts).map((port) => port.split("/")[0]!)),
-	];
-	logger.info("Exposed ports", { deploymentId, imageName, ports });
+// 	if (!exposedPorts) {
+// 		logger.info({ deploymentId, imageName }, "No exposed ports found");
+// 		return [];
+// 	}
 
-	return ports;
-}
+// 	const ports = [
+// 		...new Set(Object.keys(exposedPorts).map((port) => port.split("/")[0]!)),
+// 	];
+// 	logger.info({ deploymentId, imageName, ports }, "Exposed ports");
+
+// 	return ports;
+// }
 
 type RunStepArgs = {
 	command: string;
@@ -65,14 +69,12 @@ export async function runCommand(
 		buffer,
 	});
 
-	console.log({ deploymentId, command, stream: "stdout" });
-
 	streamLines(subprocess.stdout, (line) => {
-		logger.info(line, { stream: "stdout" });
+		logger.debug({ deploymentId, command, stream: "stdout" }, line);
 	});
 
 	streamLines(subprocess.stderr, (line) => {
-		logger.error(line, { stream: "stderr" });
+		logger.warn({ deploymentId, command, stream: "stderr" }, line);
 	});
 
 	try {

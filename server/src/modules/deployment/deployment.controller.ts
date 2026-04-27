@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { notFound } from "../../lib/errors.js";
+import { logger } from "../../lib/logger.js";
 import {
 	createDeployment,
 	deleteDeployment,
@@ -14,7 +15,7 @@ import {
 	deploymentIdParamsSchema,
 	updateDeploymentSchema,
 } from "./deployment.validation.js";
-import { logger } from "../../lib/logger.js";
+import { subscribeToDeploymentLogs } from "../../lib/redis.js";
 
 const removeUndefinedFields = <T extends Record<string, unknown>>(data: T) =>
 	Object.fromEntries(
@@ -29,7 +30,7 @@ export const createDeploymentHandler = async (
 		createDeploymentSchema.parse(request.body),
 	) as CreateDeploymentInput;
 
-	logger.info("Creating deployment with data: ", data);
+	logger.info({ data }, "Creating deployment");
 
 	const deployment = await createDeployment(data);
 
@@ -39,7 +40,7 @@ export const createDeploymentHandler = async (
 	});
 };
 
-export const getDeploymentsHandler = async (
+export const getAllDeploymentsHandler = async (
 	_request: Request,
 	response: Response,
 ) => {
@@ -80,6 +81,66 @@ export const updateDeploymentHandler = async (
 		message: "Deployment updated successfully.",
 		data: deployment,
 	});
+};
+
+export const streamDeploymentLogsHandler = async (
+	request: Request,
+	response: Response,
+) => {
+	const { id } = deploymentIdParamsSchema.parse(request.params);
+
+	const deployment = await getDeploymentById(id);
+	if (!deployment) {
+		throw notFound("Deployment not found.");
+	}
+
+	response.setHeader("Content-Type", "text/event-stream");
+	response.setHeader("Cache-Control", "no-cache, no-transform");
+	response.setHeader("Connection", "keep-alive");
+	response.setHeader("X-Accel-Buffering", "no");
+
+	response.flushHeaders();
+
+	const send = (record: unknown) => {
+		response.write(`data: ${JSON.stringify(record)}\n\n`);
+	};
+
+	// immediate confirmation
+	send({
+		type: "connected",
+		deploymentId: id,
+	});
+
+	const keepAlive = setInterval(() => {
+		response.write(": keepalive\n\n");
+	}, 15000);
+
+	const unsubscribe = await subscribeToDeploymentLogs(id, send);
+
+	let closed = false;
+
+	const cleanup = async () => {
+		if (closed) return;
+		closed = true;
+
+		clearInterval(keepAlive);
+
+		try {
+			await unsubscribe();
+		} catch (err) {
+			logger.error(
+				{
+					deploymentId: id,
+					error: (err as Error).message,
+				},
+				"Failed to unsubscribe deployment log listener",
+			);
+		}
+
+		response.end();
+	};
+
+	response.on("close", cleanup);
 };
 
 export const deleteDeploymentHandler = async (

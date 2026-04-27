@@ -11,12 +11,10 @@ const envSchema = z.object({
 	DATABASE_URL: z.string().trim().min(1, "DATABASE_URL is required."),
 	REDIS_HOST: z.string().trim().min(1).default("localhost"),
 	REDIS_PORT: z.coerce.number().int().positive().default(6379),
-	BUILDKIT_HOST: z
-		.string()
-		.trim()
-		.min(1, "BUILDKIT_HOST is required.")
-		.default("tcp://buildkitd:1234"),
-	IMAGE_STORE_DIR: z.string().trim().min(1).default("./tmp/images"),
+	REPO_DIR: z.string().trim().min(1).default("./tmp"),
+	LOG_LEVEL: z
+		.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
+		.default("info"),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

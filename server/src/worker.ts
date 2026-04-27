@@ -11,34 +11,30 @@ import {
 } from "./modules/deployment/deployment.service.js";
 import { startContainer as startDockerContainer } from "./pipeline/deploy.js";
 import { cloneGitRepo } from "./pipeline/git-repo.js";
-import {
-	runRailpackBuild,
-	runRailpackPrepare,
-} from "./pipeline/railpack.js";
+import { runRailpackBuild, runRailpackPrepare } from "./pipeline/railpack.js";
 
-const REPO_BASE_PATH = process.env.REPO_DIR || join(process.cwd(), "repos");
-const BUILD_WORKSPACE_PATH =
-	process.env.BUILD_DIR || join(process.cwd(), "tmp");
+const REPO_BASE_PATH = env.REPO_DIR;
 
 const buildWorker = new Worker(
 	"build-queue",
 	async (job) => {
 		const { deploymentId, repoUrl } = job.data;
 
-		logger.info("Processing build job", {
-			jobName: job.name,
-			queueName: job.queueName,
-			data: job.data,
-		});
+		logger.info(
+			{
+				jobName: job.name,
+				queueName: job.queueName,
+				data: job.data,
+			},
+			"Processing build job",
+		);
 
 		const repoDirectory = join(REPO_BASE_PATH, deploymentId);
-		const buildDirectory = join(BUILD_WORKSPACE_PATH, deploymentId);
 		const imageTag = getImageTag(deploymentId);
 
 		try {
 			await updateDeploymentStatus(deploymentId, "cloning");
 
-			// persist cloned repo
 			await mkdir(repoDirectory, { recursive: true });
 
 			await cloneGitRepo(repoUrl, {
@@ -48,18 +44,13 @@ const buildWorker = new Worker(
 
 			await updateDeploymentStatus(deploymentId, "building");
 
-			// temp workspace for railpack/build artifacts
-			await mkdir(buildDirectory, { recursive: true });
-
 			await runRailpackPrepare(repoDirectory, {
 				deploymentId,
-				buildDirectory,
 			});
 
 			await runRailpackBuild(repoDirectory, {
 				imageTag,
 				deploymentId,
-				buildDirectory,
 			});
 
 			await updateDeployment(deploymentId, { imageTag });
@@ -71,17 +62,33 @@ const buildWorker = new Worker(
 				domain: `${deploymentId}.localhost`,
 			});
 
-			await updateDeployment(deploymentId, { containerId, port, liveUrl });
+			await updateDeployment(deploymentId, {
+				containerId,
+				port,
+				liveUrl,
+			});
 			await updateDeploymentStatus(deploymentId, "live");
 
-			// start container
+			logger.info(
+				{
+					deploymentId,
+					containerId,
+					port,
+					liveUrl,
+					imageTag,
+				},
+				"Deployment live",
+			);
 		} catch (err) {
 			await updateDeploymentStatus(deploymentId, "failed").catch(
 				(updateErr) => {
-					logger.error("Failed to mark deployment as failed", {
-						deploymentId,
-						error: (updateErr as Error).message,
-					});
+					logger.error(
+						{
+							deploymentId,
+							error: (updateErr as Error).message,
+						},
+						"Failed to mark deployment as failed",
+					);
 				},
 			);
 
@@ -94,43 +101,57 @@ const buildWorker = new Worker(
 );
 
 buildWorker.on("active", (job) => {
-	logger.info("Build job started", {
-		jobId: job.id,
-		deploymentId: job.data.deploymentId,
-	});
+	logger.info(
+		{
+			jobId: job.id,
+			deploymentId: job.data.deploymentId,
+		},
+		"Build job started",
+	);
 });
 
 buildWorker.on("completed", (job) => {
-	logger.info("Build job completed", {
-		jobId: job.id,
-		deploymentId: job.data.deploymentId,
-	});
+	logger.info(
+		{
+			jobId: job.id,
+			deploymentId: job.data.deploymentId,
+		},
+		"Build job completed",
+	);
 });
 
 buildWorker.on("failed", (job, error) => {
-	logger.error("Build job failed", {
-		jobId: job?.id,
-		deploymentId: job?.data?.deploymentId,
-		error: error.message,
-		stack: error.stack,
-	});
+	logger.error(
+		{
+			jobId: job?.id,
+			deploymentId: job?.data?.deploymentId,
+			error: error.message,
+			stack: error.stack,
+		},
+		"Build job failed",
+	);
 });
 
 buildWorker.on("error", (error) => {
-	logger.error("Build worker error", {
-		error: error.message,
-		stack: error.stack,
-	});
+	logger.error(
+		{
+			error: error.message,
+			stack: error.stack,
+		},
+		"Build worker error",
+	);
 });
 
-logger.info("Build worker started", {
-	nodeEnv: env.NODE_ENV,
-	repoBasePath: REPO_BASE_PATH,
-	buildWorkspacePath: BUILD_WORKSPACE_PATH,
-});
+logger.info(
+	{
+		nodeEnv: env.NODE_ENV,
+		repoBasePath: REPO_BASE_PATH,
+	},
+	"Build worker started",
+);
 
 const shutdown = async (signal: string) => {
-	logger.info("Shutting down worker", { signal });
+	logger.info({ signal }, "Shutting down worker");
 	await buildWorker.close();
 	process.exit(0);
 };

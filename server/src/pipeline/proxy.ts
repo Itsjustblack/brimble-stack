@@ -45,10 +45,10 @@ async function getCurrentConfig(): Promise<CaddyConfig> {
 	});
 
 	if (!res.ok) {
-		logger.error("Failed to fetch Caddy config", {
+		logger.error({
 			status: res.status,
 			statusText: res.statusText,
-		});
+		}, "Failed to fetch Caddy config");
 		throw new Error(`Failed to fetch config: ${res.statusText}`);
 	}
 
@@ -68,10 +68,10 @@ async function loadConfig(config: CaddyConfig): Promise<void> {
 	if (!res.ok) {
 		const errorText = await res.text();
 
-		logger.error("Failed to load Caddy config", {
+		logger.error({
 			status: res.status,
 			error: errorText,
-		});
+		}, "Failed to load Caddy config");
 
 		throw new Error(`Failed to load config: ${res.status} ${errorText}`);
 	}
@@ -115,14 +115,14 @@ export async function addRoute({
 }: RouteConfig): Promise<void> {
 	const upstream = `${upstreamHost}:${upstreamPort}`;
 
-	logger.info("Adding reverse proxy route", { domain, upstream });
+	logger.info({ domain, upstream }, "Adding reverse proxy route");
 
 	try {
 		const config = await getCurrentConfig();
 		const server = ensureServer(config);
 
 		if (server.routes.some((route) => routeMatchesDomain(route, domain))) {
-			logger.info("Route already exists, skipping", { domain, upstream });
+			logger.info({ domain, upstream }, "Route already exists, skipping");
 			return;
 		}
 
@@ -138,27 +138,27 @@ export async function addRoute({
 
 		await loadConfig(config);
 
-		logger.info("Route added", { domain, upstream });
+		logger.info({ domain, upstream }, "Route added");
 	} catch (error) {
-		logger.error("Failed to add route", {
+		logger.error({
 			domain,
 			upstream,
 			error: error instanceof Error ? error.message : String(error),
-		});
+		}, "Failed to add route");
 
 		throw error;
 	}
 }
 
 export async function removeRoute(domain: string): Promise<void> {
-	logger.info("Removing reverse proxy route", { domain });
+	logger.info({ domain }, "Removing reverse proxy route");
 
 	try {
 		const config = await getCurrentConfig();
 		const server = config.apps?.http?.servers.srv0;
 
 		if (!server?.routes?.length) {
-			logger.info("No routes configured, nothing to remove", { domain });
+			logger.info({ domain }, "No routes configured, nothing to remove");
 			return;
 		}
 
@@ -171,18 +171,18 @@ export async function removeRoute(domain: string): Promise<void> {
 		const removed = before - server.routes.length;
 
 		if (removed === 0) {
-			logger.info("No matching route found", { domain });
+			logger.info({ domain }, "No matching route found");
 			return;
 		}
 
 		await loadConfig(config);
 
-		logger.info("Route removed", { domain, removed });
+		logger.info({ domain, removed }, "Route removed");
 	} catch (error) {
-		logger.error("Failed to remove route", {
+		logger.error({
 			domain,
 			error: error instanceof Error ? error.message : String(error),
-		});
+		}, "Failed to remove route");
 
 		throw error;
 	}

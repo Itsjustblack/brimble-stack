@@ -11,13 +11,12 @@ type RailpackPaths = {
 
 type RunRailpackPrepareOptions = {
 	deploymentId: string;
-	buildDirectory: string;
 };
 
 const RAILPACK_FRONTEND_IMAGE = "ghcr.io/railwayapp/railpack-frontend:latest";
 
-function railpackPaths(buildDirectory: string): RailpackPaths {
-	const planDir = join(buildDirectory, ".railpack");
+function railpackPaths(repoDirectory: string): RailpackPaths {
+	const planDir = join(repoDirectory, ".railpack");
 	const planPath = join(planDir, "railpack-plan.json");
 	const infoPath = join(planDir, "railpack-info.json");
 
@@ -32,17 +31,17 @@ export async function runRailpackPrepare(
 	repoDirectory: string,
 	opts: RunRailpackPrepareOptions,
 ): Promise<RailpackPaths> {
-	const { deploymentId, buildDirectory } = opts;
-	const { planDir, planPath, infoPath } = railpackPaths(buildDirectory);
+	const { deploymentId } = opts;
+	const { planDir, planPath, infoPath } = railpackPaths(repoDirectory);
 
 	await mkdir(planDir, { recursive: true });
 
-	logger.info("Railpack prepare started", {
+	logger.info({
 		deploymentId,
 		repoDirectory,
 		planPath,
 		infoPath,
-	});
+	}, "Railpack prepare started");
 
 	await runCommand({
 		command: "railpack",
@@ -63,11 +62,11 @@ export async function runRailpackPrepare(
 		},
 	});
 
-	logger.info("Railpack prepare completed", {
+	logger.info({
 		deploymentId,
 		planPath,
 		infoPath,
-	});
+	}, "Railpack prepare completed");
 
 	return {
 		planDir,
@@ -79,22 +78,21 @@ export async function runRailpackPrepare(
 type RunRailpackBuildOptions = {
 	imageTag: string;
 	deploymentId: string;
-	buildDirectory: string;
 };
 
 export async function runRailpackBuild(
 	repoDirectory: string,
 	opts: RunRailpackBuildOptions,
 ) {
-	const { deploymentId, imageTag, buildDirectory } = opts;
-	const { planPath } = railpackPaths(buildDirectory);
+	const { deploymentId, imageTag } = opts;
+	const { planPath } = railpackPaths(repoDirectory);
 
-	logger.info("Railpack build started", {
+	logger.info({
 		deploymentId,
 		imageTag,
 		repoDirectory,
 		planPath,
-	});
+	}, "Railpack build started");
 
 	await runCommand({
 		command: "docker",
@@ -130,8 +128,8 @@ export async function runRailpackBuild(
 		},
 	});
 
-	logger.info("Railpack build completed", {
+	logger.info({
 		deploymentId,
 		imageTag,
-	});
+	}, "Railpack build completed");
 }

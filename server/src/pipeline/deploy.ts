@@ -23,13 +23,13 @@ export async function startContainer(opts: StartContainerOptions) {
 
 	const containerName = `deployment-${deploymentId}`;
 
-	logger.info("Starting container", {
+	logger.info({
 		deploymentId,
 		imageTag,
 		containerName,
 		port,
 		network,
-	});
+	}, "Starting container");
 
 	const args = [
 		"run",
@@ -67,12 +67,12 @@ export async function startContainer(opts: StartContainerOptions) {
 	const containerId =
 		typeof result.stdout === "string" ? result.stdout.trim() : "";
 
-	logger.info("Container started successfully", {
+	logger.info({
 		deploymentId,
 		containerId,
 		containerName,
 		port,
-	});
+	}, "Container started successfully");
 
 	await addRoute({
 		domain,

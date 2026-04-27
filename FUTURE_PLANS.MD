@@ -16,7 +16,7 @@ All services run on a single Docker network: `brimble-network`.
 
 | Service               | What it does                                                                                                                                                   |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **postgres**          | Stores deployments + every log line. The source of truth for "what was deployed" and "what was logged".                                                        |
+| **postgres**          | Stores deployments + every log line. The source of truth for "what was deployed" and"what was logged".                                                        |
 | **redis**             | Two jobs: BullMQ build queue, and pub/sub channel for live log streaming between worker → api.                                                                 |
 | **buildkitd**         | The image builder. Worker tells it "build this repo", it produces a `.tar` image.                                                                              |
 | **api**               | Express server. Serves the REST API the frontend uses (create/list/delete deployments) and the SSE endpoint that streams logs to the browser.                  |
@@ -62,14 +62,16 @@ All services run on a single Docker network: `brimble-network`.
 
 ## Build Process
 
-1. **User submits a git URL.** The api creates a `Deployment` row (status: `pending`) and pushes a job onto the Redis queue.
-2. **Worker picks up the job.** It creates a per-deployment logger that fans every line out to three places: terminal, postgres, and Redis pub/sub.
-3. **Clone.** Worker `git clone`s the repo into a temp dir. Status → `building`.
-4. **Prepare.** Worker runs `railpack prepare` to detect the language/framework and emit a build plan.
-5. **Build.** Worker tells buildkitd to execute the plan. Buildkitd produces an OCI image and writes it to a shared volume as a `.tar`. Status → `deploying`.
-6. **Run.** Worker `docker load`s the tar, then `docker run`s it as `deployment-<id>` on `brimble-network`.
-7. **Route.** Worker calls Caddy's admin API: `deploy-<short>.localhost` → `reverse_proxy deployment-<id>:3000`. Status → `running`. `liveUrl` is saved on the deployment row.
-8. **Live.** Browser opens `http://deploy-<short>.localhost:8080` → Caddy matches the host → forwards to the container → app responds.
+> **Current implementation status (as of 2026-04-26):** All stages below are fully operational end-to-end — clone → prepare → build → run → proxy are all working.
+
+1. **User submits a git URL.** The API creates a `Deployment` row (status: `pending`) and pushes a job onto the Redis queue.
+2. **Worker picks up the job.** The BullMQ worker in `server/src/worker.ts` dequeues the job and runs each pipeline stage in sequence, logging each step to the terminal.
+3. **Clone.** Worker `git clone --depth=1`s the repo into `/app/repos/<deploymentId>` (`server/src/pipeline/git-repo.ts` → `cloneGitRepo`). Status → `cloning`.
+4. **Prepare.** Worker runs `railpack prepare` on the cloned directory, detecting the language/framework and producing `railpack-plan.json` and `railpack-info.json` (`server/src/pipeline/railpack.ts` → `runRailpackPrepare`). Status → `building`.
+5. **Build.** Worker runs `docker buildx build --load`, passing `BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:latest` as a build arg and the Railpack-generated plan as the Dockerfile (`server/src/pipeline/railpack.ts` → `runRailpackBuild`). BuildKit executes the plan and loads the final image directly into the host daemon's image store — no intermediate tar file and no separate buildkitd service. Status → `deploying`.
+6. **Run.** Worker starts the container as `deployment-<id>` on `mini-paas-network` via `docker run -d`, without publishing any host ports (`server/src/pipeline/deploy.ts` → `startContainer`).
+7. **Route.** Worker calls Caddy's admin API to register (or idempotently update) the route `deploy-<slug>.localhost` → `reverse_proxy deployment-<id>:3000` (`server/src/pipeline/proxy.ts` → `addRoute`). Status → `live`. `liveUrl` is saved on the deployment row.
+8. **Live.** Browser opens `http://deploy-<slug>.localhost:8080` → Caddy matches the host header → forwards to the container → app responds.
 
 ---
 
@@ -95,7 +97,9 @@ The api is subscribed to that Redis channel. When a browser opens the SSE endpoi
 
 ### Docker Load: Separated from Build Step
 
-`loadDockerImage` is a standalone exported function in `railpack-build.ts` that accepts a `Readable` image stream and pipes it into `docker load`. `runRailpackBuild` handles only the buildctl invocation; it passes its stdout to `loadDockerImage` and awaits both concurrently via `Promise.all`. Each function owns its own logging and error handling.
+> **Superseded.** See "Docker Load: No Longer a Separate Step" in the Decisions Revised section below. `docker buildx build --load` performs build-and-load in one invocation; there is no intermediate stream or separate `loadDockerImage` function in the current implementation.
+
+~~`loadDockerImage` is a standalone exported function in `railpack-build.ts` that accepts a `Readable` image stream and pipes it into `docker load`. `runRailpackBuild` handles only the buildctl invocation; it passes its stdout to `loadDockerImage` and awaits both concurrently via `Promise.all`. Each function owns its own logging and error handling.~~
 
 ### Docker CLI in the Worker Image: Static Binary, No Daemon
 
@@ -203,6 +207,54 @@ The following decisions documented above have been superseded by the current imp
 1. **One client, one auth surface** — All build and run calls go through the same socket; there is no separate buildkitd endpoint to discover, secure, or health-check.
 2. **Consistent with the static-CLI decision** — The worker already ships only the Docker CLI (no `dockerd`), so routing every Docker operation through the host daemon was the natural extension.
 
+### Live URL: Deployment ID Subdomain on Caddy's Standard Ports
+
+**Previous decision:** The public URL pattern was `http://deploy-<slug>.localhost:8080`, with Caddy publishing the system on a single non-standard port (`:8080`) and the subdomain derived from a stable repo slug.
+
+**New decision:** The live URL is `http://<deploymentId>.localhost`, where `<deploymentId>` is the full deployment UUID. Caddy publishes the standard HTTP/HTTPS ports (`80:80`, `443:443`, `443:443/udp`) per [docker-compose.yml](docker-compose.yml). The worker computes `domain = "${deploymentId}.localhost"` directly in [server/src/worker.ts:62](server/src/worker.ts#L62) and passes it to `startContainer`.
+
+**Reasons for the change:**
+
+1. **Standard ports remove user-visible surface** — Hitting `http://<id>.localhost` is shorter than `:8080` and matches the way browsers handle bare-host URLs.
+2. **Slug work was deferred** — Repo-derived slug generation is not yet implemented (see Future Plans #10), so the deployment UUID is used as a unique, collision-free identifier instead.
+
+**Tradeoff:** Because the subdomain is per-deployment rather than per-app, redeploying the same repo today produces a *new* URL each time. The "App Identity: Stable Slug" decision still stands as the target end-state; it just isn't implemented yet (see Future Plans #23).
+
+### Caddy Route Updates: Full Config Replace, Not Per-Route `@id` PATCH
+
+**Previous decision:** Each Caddy route was created with a deterministic `@id` derived from the app slug, and subsequent deploys updated that route in place via Caddy's `@id`-addressed admin API.
+
+**New decision:** [server/src/pipeline/proxy.ts](server/src/pipeline/proxy.ts) fetches the entire current config (`GET /config/`), mutates the in-memory `apps.http.servers.srv0.routes` array, and replaces the whole config via `POST /load`. Routes are matched by host string in [proxy.ts:107](server/src/pipeline/proxy.ts#L107), not by `@id`. `addRoute` is idempotent (skips if a route with the same host already exists), and `removeRoute` filters by host. The Caddyfile in [conf/Caddyfile](conf/Caddyfile) only configures the admin endpoint origins; the route table is built entirely at runtime.
+
+**Reasons for the change:**
+
+1. **Simpler API surface** — One read, one write, no per-route ID juggling.
+2. **Atomic from Caddy's perspective** — A single `POST /load` swaps the full config in one operation.
+
+**Tradeoff:** The GET-mutate-POST flow has a TOCTOU window. With multiple workers running in parallel, a second `addRoute` could overwrite a route added by the first between its read and its write. Acceptable for v1's single-worker pipeline; revisit if Future Plans #22 (parallel workers) lands. The "stable `@id`" decision remains the target end-state — see Future Plans #25.
+
+### SSE Endpoint: `/logs` and Live-Only (No Postgres Backfill Yet)
+
+**Previous decision:** The SSE path was `SSE /api/deployments/:id/logs/stream` (per the "Communication Architecture" diagram), and the api was supposed to backfill past lines from postgres before forwarding new ones from Redis pub/sub (per "How Logs Reach the Browser in Real Time").
+
+**New decision:**
+
+- **Route is `GET /api/deployments/:id/logs`** — no `/stream` suffix ([server/src/modules/deployment/routes.ts:15](server/src/modules/deployment/routes.ts#L15)).
+- **No postgres backfill.** The handler at [server/src/modules/deployment/deployment.controller.ts:86](server/src/modules/deployment/deployment.controller.ts#L86) sends an immediate `{type: "connected"}` event and then forwards live Redis pub/sub records only. The `Log` Prisma model exists in [server/prisma/schema.prisma](server/prisma/schema.prisma) but no code writes to it; replay-on-reload is therefore not yet possible. This is still tracked as Future Plan #7.
+- **Subscription pooling.** [server/src/lib/redis.ts:35](server/src/lib/redis.ts#L35) (`subscribeToDeploymentLogs`) maintains a per-channel `Set<listener>`; multiple SSE clients on the same deployment share one Redis `SUBSCRIBE`, and the channel is unsubscribed when the last listener disconnects. Returned `unsubscribe()` is awaited by the controller in [deployment.controller.ts:122](server/src/modules/deployment/deployment.controller.ts#L122) on `response.on("close")`.
+- **15-second keepalive** comment frames are written to the response to keep the connection open through intermediaries.
+
+**Reasons for the change:**
+
+1. **Cheaper to ship a live-only stream first** — Postgres persistence is a separate concern; gating SSE on it would have blocked the live-log feature.
+2. **Pooling avoids N Redis subscriptions per deployment** — Many viewers on one deployment cost one channel subscription, not N.
+
+### DeploymentStatus Enum: Additional States in Schema
+
+**Previous decision:** The "Build Process" walkthrough enumerated `pending → cloning → building → deploying → live` plus `failed`.
+
+**New decision:** [server/prisma/schema.prisma](server/prisma/schema.prisma) now defines `DeploymentStatus` as `pending | cloning | building | ready | deploying | live | running | failed | stopped`. The worker's happy path today is `pending → cloning → building → ready → live` ([server/src/worker.ts](server/src/worker.ts)) — `ready` marks "image built, container not yet started"; `deploying`, `running`, and `stopped` are reserved in the enum but not currently written by the pipeline. See Future Plans #27 for reconciliation.
+
 ---
 
 ## v1 Scope: Deliberately Excluded
@@ -221,6 +273,32 @@ The following are recognized as desirable but explicitly out of scope for v1. Th
 
 ---
 
+## Pipeline Implementation Status
+
+End-to-end deployment pipeline confirmed working as of 2026-04-26.
+
+| Stage | File | Entry Point | Status |
+| ----- | ---- | ----------- | ------ |
+| **Clone** | `server/src/pipeline/git-repo.ts` | `cloneGitRepo()` | Done |
+| **Prepare** | `server/src/pipeline/railpack.ts` | `runRailpackPrepare()` | Done |
+| **Build** | `server/src/pipeline/railpack.ts` | `runRailpackBuild()` | Done |
+| **Run** | `server/src/pipeline/deploy.ts` | `startContainer()` | Done |
+| **Proxy** | `server/src/pipeline/proxy.ts` | `addRoute()` | Done |
+
+Worker orchestration: `server/src/worker.ts` — BullMQ consumer that runs all stages in sequence.
+
+Services backing the pipeline:
+
+| Service | Container | Role |
+| ------- | --------- | ---- |
+| postgres | `mini-paas-db` | Stores deployment records and logs |
+| redis | `mini-paas-redis` | BullMQ job queue |
+| api | `mini-paas-api` | REST API + deployment creation |
+| worker | `mini-paas-worker` | Runs the build pipeline |
+| caddy | `mini-paas-caddy` | Reverse proxy; routes updated at runtime via admin API |
+
+---
+
 ## Future Plans
 
 | #   | Task                                                                                                                 | Status                                             |
@@ -230,10 +308,10 @@ The following are recognized as desirable but explicitly out of scope for v1. Th
 | 3   | Detect GitHub, Atlassian & GitLab URLs → fetch their tar files → store in DB or S3 → fetch from worker at build time | Pending                                            |
 | 4   | For unrecognized URLs: `git clone` → compress to tar → store in DB or S3                                             | Pending                                            |
 | 5   | Add GitHub Actions CI                                                                                                | Pending                                            |
-| 6   | Separate worker & api services                                                                                       | Partially done                                     |
+| 6   | Separate worker & api services                                                                                       | Done — `mini-paas-api` and `mini-paas-worker` are separate Compose services with distinct Dockerfile targets (`runtime-api` / `runtime-worker`) |
 | 7   | Persist logs in PostgreSQL                                                                                           | Pending                                            |
 | 8   | Audit Homebrew for installed packages no longer in use                                                               | Pending                                            |
-| 9   | Separate build and deploy flows                                                                                      | Pending                                            |
+| 9   | Separate build and deploy flows                                                                                      | Done — `railpack.ts` owns prepare + build; `deploy.ts` owns container start + Caddy route; `git-repo.ts` owns clone |
 | 10  | When created, add the project slug of the repo to the deployment object, need it for the image tag                   | Pending                                            |
 | 11  | Add Build Cache for buildkit to ensure it builds faster                                                              | Pending                                            |
 | 12  | Zero-downtime release strategy (blue/green or rolling) once apps support multiple replicas                           | Pending                                            |
@@ -246,3 +324,11 @@ The following are recognized as desirable but explicitly out of scope for v1. Th
 | 19  | Per-deployment metrics surface (CPU / mem / RPS) for the user                                                        | Pending                                            |
 | 20  | Move worker from Docker CLI to Docker SDK for Node (dockerode)                                                       | Pending                                            |
 | 21  | Add health checks to Compose services and gate `depends_on` on their healthy status before dependents start          | Pending                                            |
+| 22  | Enable running workers in parallel so multiple builds can happen at the same time                                    | Pending                                            |
+| 23  | Implement repo-derived stable slug for container name + Caddy host (target end-state of "App Identity: Stable Slug") — today the full deployment UUID is used, so redeploys land on a new URL | Pending                                            |
+| 24  | Implement stop-then-start lifecycle on redeploy (target end-state of "Release Strategy: Stop-then-Start") — currently the worker only `docker run`s; the previous container is not stopped/removed, so a redeploy of the same repo will collide on container name | Pending                                            |
+| 25  | Move Caddy route updates to deterministic `@id`-addressed PATCH (target end-state of "Caddy Routes: Idempotent Updates via Stable IDs") instead of full-config GET/POST `/load` | Pending                                            |
+| 26  | Add Postgres backfill on SSE connect — write each published log line to the `Log` table in the worker, then have the SSE handler page through past rows before forwarding live Redis records | Pending                                            |
+| 27  | Reconcile `DeploymentStatus` usage with schema — `deploying`, `running`, and `stopped` are declared but never written by the worker today; either wire them into the pipeline or trim the enum | Pending                                            |
+| 28  | Container teardown on `DELETE /api/deployments/:id` — `deleteDeployment` removes the DB row but does not stop the container or remove the Caddy route (`removeRoute` exists in `proxy.ts` but is unused) | Pending                                            |
+| 29  | Fully decouple worker from api — today `server/src/worker.ts` imports `updateDeployment`/`updateDeploymentStatus` directly from the api's deployment service and writes to Postgres itself. Replace with an async channel (Redis pub/sub event like `deploy:<id>:status`, or a dedicated BullMQ status queue) so the worker only emits events and the api owns all DB writes via the deployment service | Pending                                            |

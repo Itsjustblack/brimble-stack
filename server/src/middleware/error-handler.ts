@@ -53,7 +53,7 @@ export const errorHandler: ErrorRequestHandler = (
 			? "Internal server error."
 			: normalizedError.message;
 
-	logger.error("Request failed", {
+	logger.error({
 		method: request.method,
 		path: request.originalUrl,
 		statusCode: normalizedError.statusCode,
@@ -65,7 +65,7 @@ export const errorHandler: ErrorRequestHandler = (
 				? error.message
 				: undefined,
 		stack: error instanceof Error ? error.stack : undefined,
-	});
+	}, "Request failed");
 
 	const payload: Record<string, unknown> = {
 		message: responseMessage,

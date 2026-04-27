@@ -32,7 +32,7 @@ export async function cloneGitRepo(url: string, opts: CloneGitRepoOptions) {
 		args.push(destinationPath);
 	}
 
-	logger.info("Cloning Repository", { url, destinationPath });
+	logger.info({ url, destinationPath }, "Cloning Repository");
 
 	await runCommand({
 		command: "git",
@@ -42,7 +42,7 @@ export async function cloneGitRepo(url: string, opts: CloneGitRepoOptions) {
 		failureDetails: { url, destinationPath },
 	});
 
-	logger.info("Repository Clone complete", { url, destinationPath });
+	logger.info({ url, destinationPath }, "Repository Clone complete");
 }
 
 type DeleteGitRepoOptions = {
