@@ -19,13 +19,14 @@ enum DeploymentStatus {
   ready
   deploying
   live
-  running
   failed
   stopped
 }
 
 model Deployment {
   id          String           @id @default(uuid())
+  slug        String           @unique
+  name        String
   repoUrl     String
   status      DeploymentStatus @default(pending)
   imageTag    String?
@@ -34,4 +35,18 @@ model Deployment {
   port        Int?
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
+  envs        DeploymentEnv[]
+}
+
+model DeploymentEnv {
+  id           String     @id @default(uuid())
+  deploymentId String
+  key          String
+  value        String
+  createdAt    DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@unique([deploymentId, key])
+  @@index([deploymentId])
 }

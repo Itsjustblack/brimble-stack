@@ -1,36 +1,37 @@
 import type { Request, Response } from "express";
-import { notFound } from "../../lib/errors.js";
-import { logger } from "../../lib/logger.js";
+import { getLogger } from "../../lib/logger.js";
+import { DEPLOYMENTS_CHANNEL } from "../../lib/redis.js";
+import { openSseStream } from "../../lib/sse.js";
+import {
+	getDeploymentLogStreamKey,
+	removeUndefinedFields,
+} from "../../lib/utils.js";
 import {
 	createDeployment,
 	deleteDeployment,
-	getDeploymentById,
+	getDeploymentBySlug,
 	getDeployments,
+	startDeployment,
+	stopDeployment,
 	updateDeployment,
 	type CreateDeploymentInput,
 	type UpdateDeploymentInput,
 } from "./deployment.service.js";
 import {
-	createDeploymentSchema,
-	deploymentIdParamsSchema,
+	deploymentSchema,
+	deploymentSlugParamsSchema,
 	updateDeploymentSchema,
 } from "./deployment.validation.js";
-import { subscribeToDeploymentLogs } from "../../lib/redis.js";
-
-const removeUndefinedFields = <T extends Record<string, unknown>>(data: T) =>
-	Object.fromEntries(
-		Object.entries(data).filter(([, value]) => value !== undefined),
-	) as T;
 
 export const createDeploymentHandler = async (
 	request: Request,
 	response: Response,
 ) => {
 	const data = removeUndefinedFields(
-		createDeploymentSchema.parse(request.body),
+		deploymentSchema.parse(request.body),
 	) as CreateDeploymentInput;
 
-	logger.info({ data }, "Creating deployment");
+	getLogger().info({ data }, "Creating deployment");
 
 	const deployment = await createDeployment(data);
 
@@ -40,27 +41,12 @@ export const createDeploymentHandler = async (
 	});
 };
 
-export const getAllDeploymentsHandler = async (
-	_request: Request,
-	response: Response,
-) => {
-	const deployments = await getDeployments();
-
-	return response.status(200).json({
-		data: deployments,
-	});
-};
-
-export const getDeploymentByIdHandler = async (
+export const getDeploymentBySlugHandler = async (
 	request: Request,
 	response: Response,
 ) => {
-	const { id } = deploymentIdParamsSchema.parse(request.params);
-	const deployment = await getDeploymentById(id);
-
-	if (!deployment) {
-		throw notFound("Deployment not found.");
-	}
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
+	const deployment = await getDeploymentBySlug(slug);
 
 	return response.status(200).json({
 		data: deployment,
@@ -71,11 +57,11 @@ export const updateDeploymentHandler = async (
 	request: Request,
 	response: Response,
 ) => {
-	const { id } = deploymentIdParamsSchema.parse(request.params);
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
 	const data = removeUndefinedFields(
 		updateDeploymentSchema.parse(request.body),
 	) as UpdateDeploymentInput;
-	const deployment = await updateDeployment(id, data);
+	const deployment = await updateDeployment(slug, data);
 
 	return response.status(200).json({
 		message: "Deployment updated successfully.",
@@ -83,72 +69,63 @@ export const updateDeploymentHandler = async (
 	});
 };
 
+export const streamDeploymentsHandler = async (
+	request: Request,
+	response: Response,
+) => {
+	const deployments = await getDeployments();
+
+	await openSseStream(request, response, {
+		channel: DEPLOYMENTS_CHANNEL,
+		initialEvent: { type: "connected", deployments },
+	});
+};
+
 export const streamDeploymentLogsHandler = async (
 	request: Request,
 	response: Response,
 ) => {
-	const { id } = deploymentIdParamsSchema.parse(request.params);
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
+	await getDeploymentBySlug(slug);
 
-	const deployment = await getDeploymentById(id);
-	if (!deployment) {
-		throw notFound("Deployment not found.");
-	}
-
-	response.setHeader("Content-Type", "text/event-stream");
-	response.setHeader("Cache-Control", "no-cache, no-transform");
-	response.setHeader("Connection", "keep-alive");
-	response.setHeader("X-Accel-Buffering", "no");
-
-	response.flushHeaders();
-
-	const send = (record: unknown) => {
-		response.write(`data: ${JSON.stringify(record)}\n\n`);
-	};
-
-	// immediate confirmation
-	send({
-		type: "connected",
-		deploymentId: id,
+	await openSseStream(request, response, {
+		streamKey: getDeploymentLogStreamKey(slug),
+		initialEvent: { type: "connected", slug },
 	});
+};
 
-	const keepAlive = setInterval(() => {
-		response.write(": keepalive\n\n");
-	}, 15000);
+export const stopDeploymentHandler = async (
+	request: Request,
+	response: Response,
+) => {
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
+	const deployment = await stopDeployment(slug);
 
-	const unsubscribe = await subscribeToDeploymentLogs(id, send);
+	return response.status(200).json({
+		message: "Deployment stopped successfully.",
+		data: deployment,
+	});
+};
 
-	let closed = false;
+export const startDeploymentHandler = async (
+	request: Request,
+	response: Response,
+) => {
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
+	const deployment = await startDeployment(slug);
 
-	const cleanup = async () => {
-		if (closed) return;
-		closed = true;
-
-		clearInterval(keepAlive);
-
-		try {
-			await unsubscribe();
-		} catch (err) {
-			logger.error(
-				{
-					deploymentId: id,
-					error: (err as Error).message,
-				},
-				"Failed to unsubscribe deployment log listener",
-			);
-		}
-
-		response.end();
-	};
-
-	response.on("close", cleanup);
+	return response.status(200).json({
+		message: "Deployment start triggered successfully.",
+		data: deployment,
+	});
 };
 
 export const deleteDeploymentHandler = async (
 	request: Request,
 	response: Response,
 ) => {
-	const { id } = deploymentIdParamsSchema.parse(request.params);
-	await deleteDeployment(id);
+	const { slug } = deploymentSlugParamsSchema.parse(request.params);
+	await deleteDeployment(slug);
 
 	return response.status(200).json({
 		message: "Deployment deleted successfully.",

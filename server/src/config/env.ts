@@ -15,6 +15,12 @@ const envSchema = z.object({
 	LOG_LEVEL: z
 		.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
 		.default("info"),
+	ENCRYPTION_KEY: z
+		.string()
+		.regex(
+			/^[0-9a-f]{64}$/i,
+			"ENCRYPTION_KEY must be 64 hex chars (32 bytes). Generate with: openssl rand -hex 32",
+		),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

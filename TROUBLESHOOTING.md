@@ -4,7 +4,7 @@ A log of hard-to-diagnose issues and their fixes.
 
 ---
 
-## Worker: `railpack prepare` fails with "no such file or directory" on `/var/lib/railpack/tmp`
+## 1. Worker: `railpack prepare` fails with "no such file or directory" on `/var/lib/railpack/tmp`
 
 **Error:**
 
@@ -57,7 +57,7 @@ The volume was meant to persist mise-downloaded toolchains between restarts. Wit
 
 ---
 
-## Worker: Buildkit build fails immediately — `buildctl` can't reach the daemon
+## 2. Worker: Buildkit build fails immediately — `buildctl` can't reach the daemon
 
 **Error:**
 
@@ -119,7 +119,7 @@ BUILDKIT_HOST=tcp://localhost:1234
 
 ---
 
-## Worker: Buildkit build fails with `403 Forbidden` pulling the railpack frontend image
+## 3. Worker: Buildkit build fails with `403 Forbidden` pulling the railpack frontend image
 
 **Error:**
 
@@ -155,3 +155,97 @@ curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/<owner>/<name>/tag
 ```
 
 A valid token + a tags list means the repo exists and is public. A `403` on the token endpoint usually means the repo name is wrong or the package is private.
+
+---
+
+## 4. Deployments: user env vars never reach the app even though they're set in the form
+
+**Symptom:**
+
+User sets an env var (e.g. `NAME=Jason`) when creating a deployment. Build completes, container starts, but the deployed app behaves as if the variable is unset (e.g. a Next.js page reading `process.env.NAME || 'Guest'` always renders "Guest"). Restarting the container with `-e NAME=Jason` in `docker run` doesn't help.
+
+**Cause:**
+
+Two problems, layered.
+
+1. **Statically prerendered Next.js pages.** A synchronous Server Component with no dynamic indicators (`cookies()`, `headers()`, `fetch({ cache: 'no-store' })`, `export const dynamic = 'force-dynamic'`) is rendered to HTML at `next build` time. Once the image is built, that HTML is fixed — `docker run -e NAME=...` has no effect on a string already baked into the static file. So the env var **must** be present during the build, not just at container start.
+
+2. **Wrong Railpack contract.** The pipeline was passing user vars to docker as `--build-arg KEY=VALUE`. Railpack's custom BuildKit frontend treats user env vars as **secrets**, not build-args. Per [Railpack docs](https://github.com/railwayapp/railpack/blob/main/docs/src/content/docs/architecture/secrets.md), the required shape with a custom frontend is:
+
+   ```bash
+   # 1. Plan time — register the names in the build plan
+   railpack prepare <repo> --env NAME=Jason --plan-out plan.json
+
+   # 2. Build time — mount values as BuildKit secrets + cache-busting hash
+   NAME=Jason docker buildx build \
+     --build-arg BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:latest \
+     --secret id=NAME,env=NAME \
+     --build-arg secrets-hash=<sha256> \
+     -f plan.json <repo>
+   ```
+
+   Without `--env` at plan time, no step in the plan has the secret available. Arbitrary `--build-arg` values (other than `BUILDKIT_SYNTAX` and `secrets-hash`) are silently ignored by the Railpack frontend — they don't become env vars during build steps. So `next build` runs with `process.env.NAME` undefined, "Guest" gets baked into the static HTML, and the runtime `-e NAME=...` does nothing.
+
+**Fix:**
+
+Three changes across the pipeline:
+
+1. **[server/src/lib/utils.ts](server/src/lib/utils.ts)** — extend `runCommand` to forward an optional `env` map to the subprocess (execa's `extendEnv: true` default merges with `process.env`):
+
+   ```ts
+   type RunStepArgs = {
+     ...
+     env?: Record<string, string>;
+   };
+
+   const subprocess = execa(command, args, {
+     stdout: "pipe",
+     stderr: "pipe",
+     buffer,
+     ...(env ? { env } : {}),
+   });
+   ```
+
+2. **[server/src/pipeline/railpack.ts](server/src/pipeline/railpack.ts)** — pass env names to `railpack prepare` via `--env`, and at build time switch from `--build-arg KEY=VALUE` to BuildKit secrets + a cache-bust hash:
+
+   ```ts
+   function computeSecretsHash(env: Record<string, string>): string {
+     const sorted = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
+     return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+   }
+
+   // prepare
+   for (const [key, value] of Object.entries(env)) {
+     prepareArgs.push("--env", `${key}=${value}`);
+   }
+
+   // build
+   for (const key of envKeys) {
+     buildArgs.push("--secret", `id=${key},env=${key}`);
+   }
+   buildArgs.push("--build-arg", `secrets-hash=${computeSecretsHash(env)}`);
+
+   await runCommand({
+     command: "docker",
+     args: buildArgs,
+     slug,
+     ...(envKeys.length > 0 ? { env } : {}), // values read by --secret id=KEY,env=KEY
+     ...
+   });
+   ```
+
+3. **[server/src/worker.ts](server/src/worker.ts)** — fetch the decrypted env vars **before** `railpack prepare` so they end up in the plan's secrets list, then pass the same map to the build:
+
+   ```ts
+   const buildEnv = await getEnvVarsDecrypted(slug);
+   await runRailpackPrepare(repoDirectory, { slug, env: buildEnv });
+   await runRailpackBuild(repoDirectory, { imageTag, slug, env: buildEnv });
+   ```
+
+**Why `secrets-hash` matters:**
+
+BuildKit does not invalidate a layer when a secret's *value* changes (it only tracks the names declared in the plan). Without `--build-arg secrets-hash=<sha>`, changing `NAME=Jason` → `NAME=Alex` would hit a cached layer and the new value would never reach `next build`. The hash is a sha256 over the sorted entries, mounted into the layer by Railpack to force cache invalidation when any value changes.
+
+**Caveat — env vars changed *after* the initial build:**
+
+`updateDeployment` saves env vars but does not re-queue a build, and `startDeployment` just runs the existing image. So changing env vars on an existing deployment still won't take effect for statically prerendered pages — the user has to trigger a rebuild (currently: delete and recreate). Wiring env mutations to enqueue a `build` job is a separate fix.

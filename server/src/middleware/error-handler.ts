@@ -8,7 +8,7 @@ import {
 	internalError,
 	notFound,
 } from "../lib/errors.js";
-import { logger } from "../lib/logger.js";
+import { getLogger } from "../lib/logger.js";
 
 const isProduction = env.NODE_ENV === "production";
 
@@ -53,7 +53,7 @@ export const errorHandler: ErrorRequestHandler = (
 			? "Internal server error."
 			: normalizedError.message;
 
-	logger.error({
+	getLogger().error({
 		method: request.method,
 		path: request.originalUrl,
 		statusCode: normalizedError.statusCode,

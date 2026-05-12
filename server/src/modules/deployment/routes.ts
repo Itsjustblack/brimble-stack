@@ -2,19 +2,23 @@ import { Router } from "express";
 import {
 	createDeploymentHandler,
 	deleteDeploymentHandler,
-	getDeploymentByIdHandler,
-	getAllDeploymentsHandler,
+	getDeploymentBySlugHandler,
+	startDeploymentHandler,
+	stopDeploymentHandler,
 	streamDeploymentLogsHandler,
+	streamDeploymentsHandler,
 	updateDeploymentHandler,
 } from "./deployment.controller.js";
 
 const deploymentRouter = Router();
 
 deploymentRouter.post("/", createDeploymentHandler);
-deploymentRouter.get("/", getAllDeploymentsHandler);
-deploymentRouter.get("/:id/logs", streamDeploymentLogsHandler);
-deploymentRouter.get("/:id", getDeploymentByIdHandler);
-deploymentRouter.patch("/:id", updateDeploymentHandler);
-deploymentRouter.delete("/:id", deleteDeploymentHandler);
+deploymentRouter.get("/", streamDeploymentsHandler);
+deploymentRouter.get("/:slug/logs", streamDeploymentLogsHandler);
+deploymentRouter.get("/:slug", getDeploymentBySlugHandler);
+deploymentRouter.post("/:slug/start", startDeploymentHandler);
+deploymentRouter.post("/:slug/stop", stopDeploymentHandler);
+deploymentRouter.patch("/:slug", updateDeploymentHandler);
+deploymentRouter.delete("/:slug", deleteDeploymentHandler);
 
 export { deploymentRouter };

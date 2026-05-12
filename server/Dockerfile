@@ -21,7 +21,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # prisma.config.ts loads env via Zod; provide a throwaway URL so generate
 # doesn't fail — it does not connect at this stage.
-RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" npx prisma generate
+RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" \
+    ENCRYPTION_KEY="0000000000000000000000000000000000000000000000000000000000000000" \
+    npx prisma generate
 RUN npm run build
 
 # ---- runtime-base (shared) ----

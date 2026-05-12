@@ -1,9 +1,9 @@
-import { logger } from "../lib/logger.js";
-import { runCommand } from "../lib/utils.js";
-import { addRoute } from "./proxy.js";
+import { getLogger } from "../lib/logger.js";
+import { getImageTag, runCommand } from "../lib/utils.js";
+import { addRoute, removeRoute } from "./proxy.js";
 
 type StartContainerOptions = {
-	deploymentId: string;
+	slug: string;
 	imageTag: string;
 	domain: string;
 	port?: number;
@@ -13,7 +13,7 @@ type StartContainerOptions = {
 
 export async function startContainer(opts: StartContainerOptions) {
 	const {
-		deploymentId,
+		slug,
 		imageTag,
 		domain,
 		port = 3000,
@@ -21,15 +21,18 @@ export async function startContainer(opts: StartContainerOptions) {
 		env = {},
 	} = opts;
 
-	const containerName = `deployment-${deploymentId}`;
+	const containerName = `deployment-${slug}`;
 
-	logger.info({
-		deploymentId,
-		imageTag,
-		containerName,
-		port,
-		network,
-	}, "Starting container");
+	getLogger().info(
+		{
+			slug,
+			imageTag,
+			containerName,
+			port,
+			network,
+		},
+		"Starting container",
+	);
 
 	const args = [
 		"run",
@@ -40,9 +43,9 @@ export async function startContainer(opts: StartContainerOptions) {
 		network,
 		"--restart",
 		"unless-stopped",
+		"-e",
+		`PORT=${port}`,
 	];
-
-	args.push("-e", `PORT=${port}`);
 
 	for (const [key, value] of Object.entries(env)) {
 		args.push("-e", `${key}=${value}`);
@@ -50,83 +53,119 @@ export async function startContainer(opts: StartContainerOptions) {
 
 	args.push(imageTag);
 
-	const result = await runCommand({
-		command: "docker",
-		args,
-		deploymentId,
-		failureMessage: "Failed to start container",
-		failureDetails: {
-			imageTag,
+	try {
+		const result = await runCommand({
+			command: "docker",
+			args,
+			slug,
+			failureMessage: "Failed to start container",
+			failureDetails: {
+				imageTag,
+				containerName,
+				network,
+				port,
+			},
+			buffer: true,
+		});
+
+		const containerId =
+			typeof result.stdout === "string" ? result.stdout.trim() : "";
+
+		getLogger().info(
+			{
+				slug,
+				containerId,
+				containerName,
+				port,
+			},
+			"Container started successfully",
+		);
+
+		await addRoute({
+			domain,
+			upstreamHost: containerName,
+			upstreamPort: port,
+		});
+
+		const liveUrl = `http://${domain}`;
+
+		return {
 			containerName,
-			network,
+			containerId,
 			port,
-		},
-		buffer: true,
-	});
-
-	const containerId =
-		typeof result.stdout === "string" ? result.stdout.trim() : "";
-
-	logger.info({
-		deploymentId,
-		containerId,
-		containerName,
-		port,
-	}, "Container started successfully");
-
-	await addRoute({
-		domain,
-		upstreamHost: containerName,
-		upstreamPort: port,
-	});
-
-	const liveUrl = `http://${domain}`;
-
-	return {
-		containerName,
-		containerId,
-		port,
-		domain,
-		liveUrl,
-	};
+			domain,
+			liveUrl,
+		};
+	} catch (err) {
+		getLogger().error(
+			{ slug, imageTag, containerName, error: (err as Error).message },
+			"Failed to start container",
+		);
+		throw err;
+	}
 }
 
-// type LoadImageOptions = {
-// 	deploymentId: string;
-// 	tarPath: string;
-// };
+export async function stopContainer(slug: string, domain: string) {
+	const containerName = `deployment-${slug}`;
 
-// export async function loadDockerImage(opts: LoadImageOptions): Promise<string> {
-// 	const { deploymentId, tarPath } = opts;
+	getLogger().info({ slug, containerName }, "Stopping container");
 
-// 	logger.info("Loading Docker image", { deploymentId, tarPath });
+	await removeRoute(domain).catch((err) =>
+		getLogger().warn(
+			{ slug, domain, error: (err as Error).message },
+			"Failed to remove route, continuing cleanup",
+		),
+	);
 
-// 	const result = await runCommand({
-// 		command: "docker",
-// 		args: ["load", "-i", tarPath],
-// 		deploymentId,
-// 		failureMessage: "Failed to load Docker image",
-// 		failureDetails: { tarPath },
-// 		buffer: true,
-// 	});
+	await runCommand({
+		command: "docker",
+		args: ["stop", containerName],
+		slug,
+		failureMessage: "Failed to stop container",
+		failureDetails: { containerName },
+		buffer: true,
+	}).catch((err) =>
+		getLogger().warn(
+			{ slug, containerName, error: (err as Error).message },
+			"docker stop failed (container may not exist), continuing",
+		),
+	);
 
-// 	logger.info("Docker load result", { result });
+	await runCommand({
+		command: "docker",
+		args: ["rm", "-f", containerName],
+		slug,
+		failureMessage: "Failed to remove container",
+		failureDetails: { containerName },
+		buffer: true,
+	}).catch((err) =>
+		getLogger().warn(
+			{ slug, containerName, error: (err as Error).message },
+			"docker rm failed (container may not exist)",
+		),
+	);
 
-// 	// docker load outputs: "Loaded image: <tag>" or "Loaded image ID: <id>"
-// 	const output = result.stdout != null ? String(result.stdout).trim() : "";
-// 	const match = output.match(/Loaded image(?:\sID)?:\s*(.+)/);
-// 	const imageTag = match?.[1]?.trim();
-// 	if (!imageTag) {
-// 		throw new Error(
-// 			`Could not parse image tag from docker load output: ${output}`,
-// 		);
-// 	}
+	getLogger().info({ slug, containerName }, "Container stopped and removed");
+}
 
-// 	logger.info("Docker image loaded successfully", {
-// 		deploymentId,
-// 		tarPath,
-// 		imageTag,
-// 	});
+export async function deleteContainerImage(slug: string) {
+	const imageName = getImageTag(slug);
 
-// 	return imageTag;
-// }
+	getLogger().info({ slug, imageName }, "Deleting image");
+
+	runCommand({
+		command: "docker",
+		args: ["rmi", imageName],
+		slug,
+		failureMessage: "Failed to remove image",
+		failureDetails: { imageName },
+		buffer: true,
+	}).catch((err) =>
+		getLogger().warn(
+			{ slug, imageName, error: (err as Error).message },
+			"docker rmi failed (image may not exist), continuing",
+		),
+	);
+
+	getLogger().info({ slug, imageName }, "Image deleted");
+}

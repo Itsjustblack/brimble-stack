@@ -1,7 +1,7 @@
 import cors from "cors";
 import express from "express";
 import { env } from "./config/env.js";
-import { httpLogger, logger } from "./lib/logger.js";
+import { httpLogger, getLogger } from "./lib/logger.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { router } from "./routes.js";
 
@@ -21,5 +21,5 @@ app.use(errorHandler);
 const PORT = env.PORT;
 
 app.listen(PORT, () => {
-	logger.info(`Server running on port ${PORT}`);
+	getLogger().info(`Server running on port ${PORT}`);
 });

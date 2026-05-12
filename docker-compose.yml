@@ -38,6 +38,7 @@ services:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/mini_paas
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      ENCRYPTION_KEY: 8a111921327620308ed634cd1113aa76e18b40b1ae4fc46e05c18c504a16b44c
     ports:
       - "3000:3000"
     networks:
@@ -57,6 +58,7 @@ services:
       DATABASE_URL: postgresql://admin:password123@postgres:5432/mini_paas
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      ENCRYPTION_KEY: 8a111921327620308ed634cd1113aa76e18b40b1ae4fc46e05c18c504a16b44c
 
       # Enable BuildKit
       DOCKER_BUILDKIT: 1
@@ -85,6 +87,20 @@ services:
     networks:
       - mini-paas-network
 
+  client:
+    build:
+      context: ./client
+    container_name: mini-paas-client
+    restart: always
+    environment:
+      VITE_API_URL: http://localhost:3000/api
+    ports:
+      - "5173:3000"
+    networks:
+      - mini-paas-network
+    depends_on:
+      - api
+
   caddy:
     image: caddy:2
     container_name: mini-paas-caddy
@@ -99,6 +115,9 @@ services:
       - ./conf:/etc/caddy
       - caddy_data:/data
       - caddy_config:/config
+    depends_on:
+      - api
+      - client
 
 networks:
   mini-paas-network:
